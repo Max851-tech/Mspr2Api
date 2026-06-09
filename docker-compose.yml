@@ -1,0 +1,42 @@
+services:
+  ai-service:
+    build: .
+    ports:
+      - "8001:8001"
+    environment:
+      - MONGODB_URL=mongodb://mongo:27017
+      - MONGODB_DB=healthai_coach
+      - APP_ENV=development
+      # MariaDB : pointer vers le conteneur ou l'hôte selon votre setup
+      # Si MariaDB tourne sur votre machine host :
+      # - MARIADB_HOST=host.docker.internal
+      # Si MariaDB est dans un autre Docker network (TPRE501) :
+      # - MARIADB_HOST=mariadb  (nom du service)
+    env_file:
+      - .env
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - healthai-network
+
+  mongo:
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - healthai-network
+
+volumes:
+  mongo_data:
+
+networks:
+  healthai-network:
+    driver: bridge
