@@ -18,6 +18,7 @@ import logging
 from typing import Optional
 from datetime import date, timedelta
 
+import aiomysql
 from src.core.mariadb import get_pool, is_available
 
 logger = logging.getLogger(__name__)

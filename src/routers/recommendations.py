@@ -15,7 +15,13 @@ from src.models.recommendation import (
     ExerciseSession,
 )
 from src.services.nutrition_service import detect_imbalances, calculate_daily_targets
+from src.services.progression_service import build_weekly_program
 from src.repositories.recommendation_repository import save_recommendation, get_recommendations_by_user
+from src.repositories.mariadb_repository import (
+    get_user_full_profile,
+    get_daily_macros_summary,
+    get_sport_history,
+)
 from src.services.llm_service import (
     generate_nutrition_recommendations,
     generate_meal_plan,
@@ -71,8 +77,27 @@ async def nutrition_recommendations(
     _: str = AuthDep,
 ):
     profile = body.profile
+    profile_dict = profile.model_dump()
+
+    # Enrichir avec les données réelles MariaDB si utilisateur connecté
+    if x_user_id:
+        mariadb_profile = await get_user_full_profile(int(x_user_id))
+        nutrition_summary = await get_daily_macros_summary(int(x_user_id), days=7)
+        if mariadb_profile:
+            # Fusionner : les données MariaDB enrichissent le profil fourni
+            profile_dict.update({
+                "prenom": mariadb_profile.get("prenom"),
+                "age": mariadb_profile.get("age", profile.age),
+                "weight_kg": mariadb_profile.get("weight_kg", profile.weight_kg),
+                "taille_cm": mariadb_profile.get("taille_cm", profile.height_cm),
+                "imc": mariadb_profile.get("imc"),
+                "stress_moyen": mariadb_profile.get("stress_moyen"),
+                "sommeil_moyen_h": mariadb_profile.get("sommeil_moyen_h"),
+                "historique_nutrition": nutrition_summary,
+            })
+
     daily_targets = calculate_daily_targets(
-        weight_kg=profile.weight_kg,
+        weight_kg=profile_dict.get("weight_kg", profile.weight_kg),
         goal=profile.goal.value,
         fitness_level=profile.fitness_level.value,
     )
@@ -80,14 +105,14 @@ async def nutrition_recommendations(
     imbalances = detect_imbalances_from_current(body.current_macros, daily_targets)
 
     recommendations, model = await generate_nutrition_recommendations(
-        profile=profile.model_dump(),
+        profile=profile_dict,
         macros=body.current_macros or {},
         imbalances=imbalances,
         daily_targets=daily_targets,
     )
 
     meal_plan_data, _ = await generate_meal_plan(
-        profile=profile.model_dump(),
+        profile=profile_dict,
         daily_targets=daily_targets,
     )
 
@@ -100,13 +125,12 @@ async def nutrition_recommendations(
         model_used=model,
     )
 
-    # Persistance MongoDB (best-effort)
     try:
         await save_recommendation(RecommendationDocument(
             user_id=x_user_id,
             session_id=x_session_id or str(uuid.uuid4()),
             type="nutrition",
-            profile_snapshot=profile.model_dump(),
+            profile_snapshot=profile_dict,
             daily_targets=daily_targets,
             meal_plan=[m.model_dump() for m in meal_plan],
             recommendations=recommendations,
@@ -132,27 +156,56 @@ async def sport_recommendations(
     _: str = AuthDep,
 ):
     profile = body.profile
-    goal = profile.goal.value
+    profile_dict = profile.model_dump()
+    utilisateur_id = int(x_user_id) if x_user_id else None
 
-    exercises = BASE_EXERCISES.get(goal, BASE_EXERCISES["general_health"])
+    # Enrichir avec les données réelles MariaDB
+    if utilisateur_id:
+        mariadb_profile = await get_user_full_profile(utilisateur_id)
+        sport_history = await get_sport_history(utilisateur_id, days=30)
+        if mariadb_profile:
+            profile_dict.update({
+                "prenom": mariadb_profile.get("prenom"),
+                "fitness_level": mariadb_profile.get("fitness_level", profile.fitness_level.value),
+                "historique_sport": sport_history,
+            })
+    else:
+        sport_history = []
 
-    if body.injuries:
-        exercises = _filter_exercises_for_injuries(exercises, body.injuries)
+    # Construire le programme avec progression adaptative + exercices MariaDB
+    weekly_program_data, progression_meta = await build_weekly_program(
+        utilisateur_id=utilisateur_id,
+        sessions_per_week=body.sessions_per_week,
+        session_duration_min=body.session_duration_min,
+        fitness_level=profile_dict.get("fitness_level", profile.fitness_level.value),
+        goal=profile.goal.value,
+        available_equipment=body.available_equipment,
+        injuries=body.injuries,
+    )
 
+    # Convertir en ExerciseSession
     weekly_program = [
         ExerciseSession(
-            name=f"Séance {i + 1} - {DAYS_OF_WEEK[i]}",
-            duration_min=body.session_duration_min,
-            exercises=exercises,
-            intensity=_get_intensity(profile.fitness_level.value),
+            name=f"Séance {s['session_number']} - {s['day']} ({s['label']})",
+            duration_min=s["duration_min"],
+            exercises=s["exercises"],
+            intensity=s["intensity"],
         )
-        for i in range(body.sessions_per_week)
+        for s in weekly_program_data
     ]
 
     recommendations, progression_notes, model = await generate_sport_recommendations(
-        profile={**profile.model_dump(), "injuries": body.injuries},
-        program={"sessions": body.sessions_per_week, "exercises": [e["name"] for e in exercises]},
+        profile={**profile_dict, "injuries": body.injuries},
+        program={
+            "sessions": body.sessions_per_week,
+            "exercises": [ex["name"] for s in weekly_program_data for ex in s["exercises"]][:8],
+        },
+        progression_meta=progression_meta,
     )
+
+    # Utiliser la note de progression du service si Ollama n'en génère pas
+    if not progression_notes or progression_notes == "Augmentez progressivement l'intensité chaque semaine.":
+        progression_notes = progression_meta["progression_note"]
 
     result = SportRecommendationResponse(
         weekly_program=weekly_program,
