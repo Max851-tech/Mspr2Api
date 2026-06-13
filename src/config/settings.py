@@ -12,11 +12,14 @@ class Settings(BaseSettings):
 
     # HuggingFace
     HF_API_KEY: str = ""
-    HF_FOOD_MODEL: str = "nateraw/food"
+    HF_FOOD_MODEL: str = "google/vit-base-patch16-224"
     HF_INFERENCE_URL: str = "https://api-inference.huggingface.co/models"
 
     # Google Vision (optionnel)
     GOOGLE_VISION_API_KEY: str = ""
+
+    # Google Gemini Vision
+    GEMINI_API_KEY: str = ""
 
     # Ollama (LLM local)
     OLLAMA_BASE_URL: str = "http://localhost:11434"
